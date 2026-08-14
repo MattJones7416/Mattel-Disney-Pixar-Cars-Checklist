@@ -17,7 +17,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: catalog-worker/package-lock.json
+          cache-dependency-path: |
+            catalog-worker/package-lock.json
+            social-worker/package-lock.json
       - name: Validate catalogue
         run: npm run catalog:validate
       - name: Install Worker dependencies
@@ -26,3 +28,12 @@ jobs:
       - name: Type-check and dry-run Worker
         run: npm run check
         working-directory: catalog-worker
+      - name: Install community Worker dependencies
+        run: npm ci
+        working-directory: social-worker
+      - name: Audit community Worker dependencies
+        run: npm audit --audit-level=high
+        working-directory: social-worker
+      - name: Dry-run community Worker
+        run: npm run check
+        working-directory: social-worker

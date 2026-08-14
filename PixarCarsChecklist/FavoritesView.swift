@@ -6,95 +6,29 @@ struct FavoritesView: View {
     @State private var showingUnlockSheet = false
     @Binding var selectedTab: ContentView.Tab
     @Binding var selectedModel: MetalModel?
+    var sourceModels: [MetalModel]?
+    var readOnly: Bool = false
+    var onCollectionChanged: () -> Void = {}
 
-    @State private var searchText = ""
-    @State private var debouncedSearchText = ""
-    @State private var searchDebouncer = Debouncer(delay: 0.3)
-    @AppStorage("favoritesSortOption") private var sortOption = "name"
-
-    private var favoriteModels: [MetalModel] {
-        var models = dataManager.allModels.filter { $0.isFavorite }
-
-        if !debouncedSearchText.isEmpty {
-            models = models.filter { $0.matches(debouncedSearchText) }
-        }
-
-        switch sortOption {
-        case "name":
-            return models.sorted { $0.name < $1.name }
-        case "number":
-            return models.sorted { $0.productCode.localizedStandardCompare($1.productCode) == .orderedAscending }
-        case "year", "difficulty":
-            return models.sorted { ($0.firstReleaseYear ?? 9999) < ($1.firstReleaseYear ?? 9999) }
-        default:
-            return models
-        }
+    private var models: [MetalModel] {
+        sourceModels ?? dataManager.favoriteModels
     }
 
     var body: some View {
         ZStack {
-            VStack(spacing: 0) {
-                SearchBar(text: $searchText)
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                    .onChange(of: searchText) { _, newValue in
-                        searchDebouncer.run {
-                            debouncedSearchText = newValue
-                        }
-                    }
+            ModelBrowserView(
+                title: "Favorites",
+                sourceModels: models,
+                emptyTitle: "No favorites yet",
+                emptySubtitle: "Tap the star on a model to add it here.",
+                storagePrefix: "favorites",
+                selectedModel: $selectedModel,
+                readOnly: readOnly,
+                onCollectionChanged: onCollectionChanged
+            )
+            .environmentObject(dataManager)
 
-                HStack {
-                    Text("\(favoriteModels.count) Favorites")
-                        .font(.headline)
-                        .padding(.leading)
-
-                    Spacer()
-
-                    Menu {
-                        Button("Sort by Name") { sortOption = "name" }
-                        Button("Sort by Product Code") { sortOption = "number" }
-                        Button("Sort by First Release") { sortOption = "year" }
-                    } label: {
-                        HStack {
-                            Text("Sort")
-                            Image(systemName: "arrow.up.arrow.down")
-                        }
-                        .padding(8)
-                        .background(Color.gray.opacity(0.1))
-                        .cornerRadius(8)
-                    }
-                    .padding(.trailing)
-                }
-                .padding(.vertical, 8)
-
-                List(favoriteModels, id: \.id) { model in
-                    Button {
-                        if purchaseManager.isUnlocked {
-                            selectedModel = model
-                        } else {
-                            // show unlock sheet
-                            showingUnlockSheet = true
-                        }
-                    } label: {
-                        ModelRowView(
-                            model: model,
-                            accentColor: Color(hex: "D92D20"),
-                            compact: false,
-                            dataManager: dataManager
-                        )
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .listRowBackground(
-                        model.checked ? Color(hex: "D92D20").opacity(0.1) : Color.clear
-                    )
-                    .disabled(!purchaseManager.isUnlocked) // prevents tapping if locked
-                }
-                .listStyle(.plain)
-            }
-            .navigationTitle("Favorites")
-
-            // Lock overlay (subtle) shown when locked
-            if !purchaseManager.isUnlocked {
+            if !readOnly && !purchaseManager.isUnlocked {
                 Color.black.opacity(0.08).ignoresSafeArea()
                 VStack {
                     Spacer()

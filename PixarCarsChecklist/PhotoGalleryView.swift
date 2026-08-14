@@ -45,16 +45,14 @@ struct PhotoGalleryView: View {
     @State private var showingUnlockSheet = false
 
     @State private var selectedPhoto: ModelPhoto?
-
-    private var modelsWithPhotos: [MetalModel] {
-        dataManager.allModels.filter { !dataManager.getPhotos(for: $0).isEmpty }
-    }
+    @State private var hasLoadedPhotos = false
 
     private let grid = [GridItem(.adaptive(minimum: 120), spacing: 2)]
 
     private var allPhotosWithModels: [(photo: ModelPhoto, model: MetalModel)] {
-        modelsWithPhotos.flatMap { model in
-            dataManager.getPhotos(for: model).map { (photo: $0, model: model) }
+        dataManager.allPhotos.compactMap { photo in
+            guard let model = dataManager.model(for: photo.modelId) else { return nil }
+            return (photo: photo, model: model)
         }
     }
 
@@ -104,41 +102,50 @@ struct PhotoGalleryView: View {
 
     var body: some View {
         ZStack {
-            ScrollView {
-                LazyVGrid(columns: grid, spacing: 2) {
-                    ForEach(allPhotosWithModels, id: \.photo.id) { pair in
-                        PhotoGridItemView(photo: pair.photo, model: pair.model) {
-                            if purchaseManager.isUnlocked {
-                                selectedPhoto = pair.photo
-                            } else {
-                                showingUnlockSheet = true
-                            }
-                        }
-                        .overlay(
-                            Group {
-                                if !purchaseManager.isUnlocked {
-                                    // dim + lock badge
-                                    Color.black.opacity(0.12)
-                                    VStack {
-                                        HStack {
-                                            Spacer()
-                                            Image(systemName: "lock")
-                                                .font(.caption2)
-                                                .foregroundColor(Color.gray.opacity(0.8))
-                                                .padding(6)
-                                                .background(Color(.systemGray5))
-                                                .clipShape(Circle())
-                                                .padding(6)
-                                                .offset(x: 40, y: -40)
-                                        }
-                                        Spacer()
-                                    }
+            if hasLoadedPhotos {
+                ScrollView {
+                    LazyVGrid(columns: grid, spacing: 2) {
+                        ForEach(allPhotosWithModels, id: \.photo.id) { pair in
+                            PhotoGridItemView(photo: pair.photo, model: pair.model) {
+                                if purchaseManager.isUnlocked {
+                                    selectedPhoto = pair.photo
+                                } else {
+                                    showingUnlockSheet = true
                                 }
                             }
-                        )
+                            .overlay(
+                                Group {
+                                    if !purchaseManager.isUnlocked {
+                                        // dim + lock badge
+                                        Color.black.opacity(0.12)
+                                        VStack {
+                                            HStack {
+                                                Spacer()
+                                                Image(systemName: "lock")
+                                                    .font(.caption2)
+                                                    .foregroundColor(Color.gray.opacity(0.8))
+                                                    .padding(6)
+                                                    .background(Color(.systemGray5))
+                                                    .clipShape(Circle())
+                                                    .padding(6)
+                                                    .offset(x: 40, y: -40)
+                                            }
+                                            Spacer()
+                                        }
+                                    }
+                                }
+                            )
+                        }
                     }
+                    .padding(8)
                 }
-                .padding(8)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .task {
+                        dataManager.loadPhotosIfNeeded()
+                        hasLoadedPhotos = true
+                    }
             }
 
             // if unlocked, selectedPhoto sheet behavior is unchanged below
@@ -150,7 +157,7 @@ struct PhotoGalleryView: View {
         // present detail viewer (unchanged when unlocked)
     #if os(iOS) && !targetEnvironment(macCatalyst)
         .fullScreenCover(item: $selectedPhoto) { tappedPhoto in
-            if let model = dataManager.allModels.first(where: { $0.id == tappedPhoto.modelId }) {
+            if let model = dataManager.model(for: tappedPhoto.modelId) {
                 let modelPhotos = dataManager.getPhotos(for: model)
                 let startIndex = modelPhotos.firstIndex { $0.id == tappedPhoto.id } ?? 0
 
@@ -170,7 +177,7 @@ struct PhotoGalleryView: View {
         }
     #else
         .sheet(item: $selectedPhoto) { tappedPhoto in
-            if let model = dataManager.allModels.first(where: { $0.id == tappedPhoto.modelId }) {
+            if let model = dataManager.model(for: tappedPhoto.modelId) {
                 let modelPhotos = dataManager.getPhotos(for: model)
                 let startIndex = modelPhotos.firstIndex { $0.id == tappedPhoto.id } ?? 0
 

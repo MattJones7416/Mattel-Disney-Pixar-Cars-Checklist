@@ -9,3 +9,4 @@ node_modules/
 .wrangler/
 *.cpuprofile
 catalog-worker/.dev.vars
+social-worker/.dev.vars

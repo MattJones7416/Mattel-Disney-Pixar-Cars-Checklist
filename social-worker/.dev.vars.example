@@ -1,0 +1,4 @@
+JWT_SECRET=paste-a-long-random-secret-here
+APNS_KEY_ID=paste-apple-apns-key-id-here
+APNS_TEAM_ID=paste-apple-team-id-here
+APNS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\npaste-apns-private-key-here\n-----END PRIVATE KEY-----"

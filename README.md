@@ -1,6 +1,6 @@
 # Pixar Cars Checklist
 
-An unofficial native SwiftUI collection tracker for Mattel Disney and Pixar *Cars* die-cast vehicles. It is a reworked version of the Metal Earth Checklist app, with a Cars-specific catalogue and collector workflow.
+An unofficial native SwiftUI collection tracker for Mattel Disney and Pixar *Cars* die-cast vehicles.
 
 ## What it tracks
 
@@ -10,6 +10,8 @@ An unofficial native SwiftUI collection tracker for Mattel Disney and Pixar *Car
 - Personal photos and notes
 - Backup and restore across iPhone, iPad, and Mac
 - Catalogue refreshes from the companion Cloudflare Worker
+- Optional collector community with accounts, posts, photos, friends, shared collections, reporting, blocking, and moderation
+- A one-time Pro unlock implemented with StoreKit 2
 
 The bundled catalogue contains 1,490 distinct released Cars variants at the time of generation. The Planes spin-off and non-vehicle plastic product lines are intentionally excluded.
 
@@ -24,7 +26,15 @@ npm run catalog:sync
 npm run catalog:validate
 ```
 
-The Cloudflare catalogue service is under `catalog-worker/`.
+The public catalogue service is under `catalog-worker/`. The community API, D1 migrations, R2 binding, and moderation page are under `social-worker/`.
+
+The permanent StoreKit product identifier is `com.mattjproductions.PixarCarsChecklist.pro`. See [APP_STORE_CONNECT_SETUP.md](APP_STORE_CONNECT_SETUP.md) before creating it in App Store Connect; Apple does not allow a saved product ID to be edited or reused.
+
+## Deployed services
+
+- Catalogue: <https://pixar-cars-catalog.mattjones7416.workers.dev>
+- Community API: <https://pixar-cars-social-api.mattjones7416.workers.dev>
+- Privacy policy: <https://pixar-cars-social-api.mattjones7416.workers.dev/privacy>
 
 ## Independence and attribution
 

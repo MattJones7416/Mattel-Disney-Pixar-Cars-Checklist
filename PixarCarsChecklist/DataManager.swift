@@ -66,13 +66,25 @@ final class DataManager: ObservableObject {
     @Published private(set) var currentUser: User
     @Published private(set) var allPhotos: [ModelPhoto] = []
     @Published private(set) var allNotes: [ModelNote] = []
+    @Published private(set) var favoriteModels: [MetalModel] = []
+    @Published private(set) var wishlistedModels: [MetalModel] = []
     @Published private(set) var isReady = false
+    private var photosLoaded = false
+    private var modelsByID: [UUID: MetalModel] = [:]
+    private var photosByModelID: [UUID: [ModelPhoto]] = [:]
+    private var notesByModelID: [UUID: ModelNote] = [:]
 
     private static func appSupportFolder() -> URL {
-        let root = try! FileManager.default.url(for: .applicationSupportDirectory,
-                                                in: .userDomainMask,
-                                                appropriateFor: nil,
-                                                create: true)
+        let root: URL
+        do {
+            root = try FileManager.default.url(for: .applicationSupportDirectory,
+                                               in: .userDomainMask,
+                                               appropriateFor: nil,
+                                               create: true)
+        } catch {
+            print("Failed to resolve Application Support directory, using temporary storage:", error)
+            root = FileManager.default.temporaryDirectory
+        }
         let bundleID = Bundle.main.bundleIdentifier ?? "PixarCarsChecklist"
         let folder = root.appendingPathComponent(bundleID, isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -81,6 +93,10 @@ final class DataManager: ObservableObject {
 
     private static func localStoreURL() -> URL {
         appSupportFolder().appendingPathComponent("default-v2.store", isDirectory: false)
+    }
+
+    private static func catalogOverridesURL() -> URL {
+        appSupportFolder().appendingPathComponent("catalog-overrides.json", isDirectory: false)
     }
 
     private static func removeStore(at url: URL) {
@@ -122,9 +138,13 @@ final class DataManager: ObservableObject {
     private var lastModelUpdateCount = 0
     private var lastSearchText = ""
 
-    // Bump if you want a one-time “catalog import” gate. We also upsert every launch so new JSON rows are always added.
-    private let bundledCatalogVersion = 1
+    // Bump when the bundled catalog changes and should be merged into existing stores once.
+    private let bundledCatalogVersion = 2026070301
+    private let stableIDMigrationKey = "stableIDMigrationVersion"
+    private let stableIDMigrationVersion = 1
     private let lastUpdatedKey = "catalogLastUpdated"
+    private let lastRemoteCatalogRefreshDayKey = "lastRemoteCatalogRefreshDay"
+    private let autoCatalogRefreshIntervalDays = 1
 
     private let developerSnapshotKey = "developerSnapshotV1"
 
@@ -152,11 +172,185 @@ final class DataManager: ObservableObject {
         let notes: [SnapshotNote]
         let photos: [SnapshotPhoto]
     }
+    private struct CatalogOverrideStore: Codable {
+        var models: [String: CatalogEditPayload] = [:]
+    }
+    private struct CatalogImportItem {
+        let baseNumber: String
+        let payload: CatalogEditPayload
+        let built: Bool
+    }
 
     private enum ImportMode {
         case upsert
         case replaceFromDeveloperJSON
     }
+
+    private func normalizedKey(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func modelsByNumber(_ models: [MetalModel]) -> [String: MetalModel] {
+        var result: [String: MetalModel] = [:]
+        for model in models {
+            let key = normalizedKey(model.number)
+            guard !key.isEmpty else { continue }
+
+            if let existing = result[key] {
+                result[key] = score(model) > score(existing) ? model : existing
+            } else {
+                result[key] = model
+            }
+        }
+        return result
+    }
+
+    private func catalogItemsByNumber(_ items: [JSONModel]) -> [String: JSONModel] {
+        var result: [String: JSONModel] = [:]
+        for item in items {
+            let key = normalizedKey(item.number)
+            guard !key.isEmpty else { continue }
+            result[key] = item
+        }
+        return result
+    }
+
+    private func readCatalogOverrides() -> [String: CatalogEditPayload] {
+        let url = Self.catalogOverridesURL()
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        do {
+            let store = try JSONDecoder().decode(CatalogOverrideStore.self, from: data)
+            return store.models.reduce(into: [:]) { result, entry in
+                let key = normalizedKey(entry.key)
+                guard !key.isEmpty else { return }
+                result[key] = entry.value
+            }
+        } catch {
+            print("[Catalog] Ignoring unreadable catalog overrides:", error)
+            return [:]
+        }
+    }
+
+    private func writeCatalogOverrides(_ overrides: [String: CatalogEditPayload]) {
+        let url = Self.catalogOverridesURL()
+        guard !overrides.isEmpty else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(CatalogOverrideStore(models: overrides))
+            try data.write(to: url, options: [.atomic])
+        } catch {
+            print("[Catalog] Failed to write catalog overrides:", error)
+        }
+    }
+
+    private func putCatalogOverride(baseNumber: String, payload: CatalogEditPayload) {
+        let key = normalizedKey(baseNumber).isEmpty ? normalizedKey(payload.number) : normalizedKey(baseNumber)
+        guard !key.isEmpty else { return }
+        var clean = payload
+        clean.number = normalizedKey(clean.number)
+        guard !clean.number.isEmpty else { return }
+        var overrides = readCatalogOverrides()
+        for (existingKey, existingPayload) in overrides {
+            if existingKey == key ||
+                existingKey == clean.number ||
+                normalizedKey(existingPayload.number) == key ||
+                normalizedKey(existingPayload.number) == clean.number {
+                overrides.removeValue(forKey: existingKey)
+            }
+        }
+        overrides[key] = clean
+        writeCatalogOverrides(overrides)
+    }
+
+    private func removeCatalogOverrides(_ keys: Set<String>) {
+        guard !keys.isEmpty else { return }
+        var overrides = readCatalogOverrides()
+        for key in keys {
+            overrides.removeValue(forKey: normalizedKey(key))
+        }
+        writeCatalogOverrides(overrides)
+    }
+
+    private func payload(from item: JSONModel) -> CatalogEditPayload {
+        CatalogEditPayload(
+            checked: item.checked,
+            name: item.name,
+            number: item.number,
+            productCode: item.productCode,
+            character: item.character,
+            firstReleaseYear: item.firstReleaseYear,
+            releaseCount: item.releaseCount,
+            series: item.series,
+            difficulty: item.difficulty,
+            sheets: item.sheets,
+            link: item.link,
+            category: item.category,
+            type: item.type,
+            status: item.status,
+            releaseDate: item.releaseDate,
+            instructionsLink: item.instructionsLink,
+            threeSixtyView: item.threeSixtyView,
+            modelDescription: item.modelDescription,
+            productImage: item.productImage
+        )
+    }
+
+    private func catalogMetadataMatches(_ item: JSONModel, _ payload: CatalogEditPayload) -> Bool {
+        normalizedKey(item.name) == normalizedKey(payload.name) &&
+            normalizedKey(item.number) == normalizedKey(payload.number) &&
+            normalizedKey(item.productCode) == normalizedKey(payload.productCode) &&
+            normalizedKey(item.character) == normalizedKey(payload.character) &&
+            item.firstReleaseYear == payload.firstReleaseYear &&
+            item.releaseCount == payload.releaseCount &&
+            normalizedKey(item.series) == normalizedKey(payload.series) &&
+            normalizedKey(item.category) == normalizedKey(payload.category) &&
+            item.difficulty == payload.difficulty &&
+            item.sheets == payload.sheets &&
+            normalizedKey(item.link) == normalizedKey(payload.link) &&
+            normalizedKey(item.instructionsLink) == normalizedKey(payload.instructionsLink) &&
+            normalizedKey(item.type) == normalizedKey(payload.type) &&
+            normalizedKey(item.status) == normalizedKey(payload.status) &&
+            normalizedKey(item.threeSixtyView) == normalizedKey(payload.threeSixtyView) &&
+            normalizedKey(item.modelDescription) == normalizedKey(payload.modelDescription) &&
+            normalizedKey(item.productImage) == normalizedKey(payload.productImage) &&
+            normalizedKey(item.releaseDate) == normalizedKey(payload.releaseDate)
+    }
+
+    private func mergedCatalogImportItems(from remoteItems: [JSONModel]) -> [CatalogImportItem] {
+        let overrides = readCatalogOverrides()
+        var overrideKeysToClear = Set<String>()
+        let remoteNumbers = Set(remoteItems.map { normalizedKey($0.number) }.filter { !$0.isEmpty })
+
+        var imports: [CatalogImportItem] = remoteItems.compactMap { item in
+            let baseNumber = normalizedKey(item.number)
+            guard !baseNumber.isEmpty else { return nil }
+            guard let override = overrides[baseNumber] else {
+                return CatalogImportItem(baseNumber: baseNumber, payload: payload(from: item), built: item.built)
+            }
+            if catalogMetadataMatches(item, override) {
+                overrideKeysToClear.insert(baseNumber)
+                return CatalogImportItem(baseNumber: baseNumber, payload: payload(from: item), built: item.built)
+            }
+            return CatalogImportItem(baseNumber: baseNumber, payload: override, built: false)
+        }
+
+        for (baseNumber, payload) in overrides where !remoteNumbers.contains(baseNumber) {
+            if remoteItems.contains(where: { catalogMetadataMatches($0, payload) }) {
+                overrideKeysToClear.insert(baseNumber)
+            } else {
+                imports.append(CatalogImportItem(baseNumber: baseNumber, payload: payload, built: false))
+            }
+        }
+
+        removeCatalogOverrides(overrideKeysToClear)
+        return imports
+    }
+
+    private let catalogNumberAliases: [String: String] = [:]
 
     // MARK: - Init
 
@@ -177,7 +371,14 @@ final class DataManager: ObservableObject {
             do {
                 container = try ModelContainer(for: Self.appSchema, configurations: [localConfig])
             } catch {
-                fatalError("Failed to open local store even after reset: \(error)")
+                print("Failed to open local store after reset; using in-memory fallback:", error)
+                let fallbackConfig = ModelConfiguration(
+                    "RecoveredInMemoryStore",
+                    schema: Self.appSchema,
+                    isStoredInMemoryOnly: true,
+                    cloudKitDatabase: .none
+                )
+                container = try! ModelContainer(for: Self.appSchema, configurations: [fallbackConfig])
             }
         }
 
@@ -193,50 +394,128 @@ final class DataManager: ObservableObject {
             self.currentUser = u
         }
 
-        #if canImport(UIKit)
-        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in _ = await self?.refreshCatalogNow() }
-        }
-        #elseif canImport(AppKit)
-        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in _ = await self?.refreshCatalogNow() }
-        }
-        #endif
-
         Task { @MainActor in
-            self.enforceStableIDs(in: self.modelContext)
-            self.refreshData()
-            await self.initializePersistentStorage()
-            self.isReady = true
+            let existingModelCount = (try? modelContext.fetchCount(FetchDescriptor<MetalModel>())) ?? 0
+
+            if existingModelCount == 0 {
+                _ = await self.initializePersistentStorage()
+                self.refreshData()
+                self.isReady = true
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                _ = await self.refreshDefaultCatalogIfNeeded()
+            } else {
+                self.refreshData()
+                self.isReady = true
+
+                // Let the app render from the existing local store before doing a bundled
+                // catalog maintenance pass after an app update.
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                let didChange = await self.initializePersistentStorage()
+                if didChange {
+                    self.refreshData(loadPhotos: self.photosLoaded)
+                }
+                _ = await self.refreshDefaultCatalogIfNeeded()
+            }
         }
     }
 
 
     // MARK: - First run & every-run seeding
 
-    private func initializePersistentStorage() async {
+    @discardableResult
+    private func initializePersistentStorage() async -> Bool {
         print("[Catalog] initializePersistentStorage: starting")
-        // Seed from JSON if empty
-        if (try? modelContext.fetchCount(FetchDescriptor<MetalModel>())) == 0 {
-            print("[Catalog] Store empty: seeding from JSON…")
-            await loadFromJSON(into: modelContext, owner: currentUser)
-            print("[Catalog] Seed complete. Current model count: \((try? modelContext.fetchCount(FetchDescriptor<MetalModel>())) ?? -1)")
+        let modelCount = (try? modelContext.fetchCount(FetchDescriptor<MetalModel>())) ?? 0
+        let catalogVersion = appMetaIntValue(for: "catalogVersion", in: modelContext)
+        let stableMigrationVersion = appMetaIntValue(for: stableIDMigrationKey, in: modelContext)
+        let needsBundledImport = modelCount == 0 || bundledCatalogVersion > catalogVersion
+        let needsStableIDMigration = stableMigrationVersion < stableIDMigrationVersion
+        var didChange = false
+
+        if needsBundledImport {
+            if modelCount == 0 {
+                print("[Catalog] Store empty: seeding from bundled JSON")
+            } else {
+                print("[Catalog] Bundled catalog version \(bundledCatalogVersion) is newer than stored version \(catalogVersion)")
+            }
+
+            let imported = await loadFromJSON(into: modelContext, owner: currentUser, allowRemote: false)
+            if imported {
+                print("[Catalog] Bundled import complete. Model count now: \((try? modelContext.fetchCount(FetchDescriptor<MetalModel>())) ?? -1)")
+                if needsStableIDMigration {
+                    enforceStableIDs(in: modelContext)
+                }
+                setAppMetaIntValue(bundledCatalogVersion, for: "catalogVersion", in: modelContext)
+                setAppMetaIntValue(stableIDMigrationVersion, for: stableIDMigrationKey, in: modelContext)
+                didChange = true
+            } else {
+                print("[Catalog] Bundled import failed; leaving catalog metadata unchanged")
+            }
+        } else {
+            print("[Catalog] Bundled catalog already imported; skipping startup import")
         }
-        print("[Catalog] Upserting bundled/remote JSON to add any new rows…")
-        await loadFromJSON(into: modelContext, owner: currentUser)
-        print("[Catalog] Upsert pass complete. Model count now: \((try? modelContext.fetchCount(FetchDescriptor<MetalModel>())) ?? -1)")
 
-        print("[Catalog] Version gate check…")
-        await runCatalogImportIfNeeded(in: modelContext, owner: currentUser)
+        if !needsBundledImport && needsStableIDMigration {
+            print("[Catalog] Running one-time stable ID migration")
+            enforceStableIDs(in: modelContext)
+            setAppMetaIntValue(stableIDMigrationVersion, for: stableIDMigrationKey, in: modelContext)
+            didChange = true
+        }
 
-        await loadFromJSON(into: modelContext, owner: currentUser)
+        if didChange {
+            try? modelContext.save()
+            print("[Catalog] Saved context after startup maintenance")
+        }
 
-        print("[Catalog] Enforcing stable IDs and de-duplicating…")
+        return didChange
+    }
+
+    private func appMetaIntValue(for key: String, in context: ModelContext) -> Int {
+        let fd = FetchDescriptor<AppMeta>(predicate: #Predicate { $0.key == key })
+        return (try? context.fetch(fd).first?.intValue) ?? 0
+    }
+
+    private func setAppMetaIntValue(_ value: Int, for key: String, in context: ModelContext) {
+        let fd = FetchDescriptor<AppMeta>(predicate: #Predicate { $0.key == key })
+        let existing = try? context.fetch(fd).first
+        let meta = existing ?? AppMeta(key: key, intValue: 0)
+        meta.intValue = value
+        if existing == nil {
+            context.insert(meta)
+        }
+    }
+
+    private func currentEpochDay() -> Int {
+        Int(Date().timeIntervalSince1970 / 86_400)
+    }
+
+    @MainActor
+    private func refreshDefaultCatalogIfNeeded() async -> Bool {
+        guard !UserDefaults.standard.bool(forKey: "devModeEnabled") else { return false }
+
+        let today = currentEpochDay()
+        let lastRefreshDay = appMetaIntValue(for: lastRemoteCatalogRefreshDayKey, in: modelContext)
+        if lastRefreshDay > 0 && today - lastRefreshDay < autoCatalogRefreshIntervalDays {
+            return true
+        }
+
+        let previousRemoteUpdate = UserDefaults.standard.object(forKey: lastUpdatedKey) as? Date
+        let imported = await loadFromJSON(into: modelContext, owner: currentUser, mode: .upsert, allowRemote: true)
+        let currentRemoteUpdate = UserDefaults.standard.object(forKey: lastUpdatedKey) as? Date
+        guard imported, currentRemoteUpdate != previousRemoteUpdate else { return false }
+
         enforceStableIDs(in: modelContext)
-
+        setAppMetaIntValue(bundledCatalogVersion, for: "catalogVersion", in: modelContext)
+        setAppMetaIntValue(stableIDMigrationVersion, for: stableIDMigrationKey, in: modelContext)
+        setAppMetaIntValue(today, for: lastRemoteCatalogRefreshDayKey, in: modelContext)
         try? modelContext.save()
-        print("[Catalog] Saved context after init pipeline. Total models: \(allModels.count)")
-        refreshData()
+        refreshData(loadPhotos: photosLoaded)
+        return true
+    }
+
+    @MainActor
+    func refreshCatalogForAppActivation() async -> Bool {
+        await refreshDefaultCatalogIfNeeded()
     }
 
     // Input model used only for decoding checked.json
@@ -251,7 +530,7 @@ final class DataManager: ObservableObject {
         let releaseCount: Int
         let series: String
         let difficulty: Int?
-        let sheets: Double
+        let sheets: Double?
         let link: String
         let instructionsLink: String
         let type: String
@@ -259,6 +538,7 @@ final class DataManager: ObservableObject {
         let threeSixtyView: String
         let modelDescription: String
         let productImage: String
+        let releaseDate: String
         let built: Bool
 
         enum CodingKeys: String, CodingKey {
@@ -267,6 +547,7 @@ final class DataManager: ObservableObject {
             case threeSixtyView = "360View"
             case modelDescription = "description"
             case productImage = "productimage"
+            case releaseDate
             // "action" / "originalNumber" may exist but are ignored
         }
 
@@ -282,7 +563,7 @@ final class DataManager: ObservableObject {
             releaseCount = (try? c.decode(Int.self, forKey: .releaseCount)) ?? 0
             series = (try? c.decode(String.self, forKey: .series)) ?? ""
             difficulty = try? c.decode(Int.self, forKey: .difficulty)
-            sheets = (try? c.decode(Double.self, forKey: .sheets)) ?? 0
+            sheets = try? c.decode(Double.self, forKey: .sheets)
             link = (try? c.decode(String.self, forKey: .link)) ?? ""
             instructionsLink = (try? c.decode(String.self, forKey: .instructionsLink)) ?? ""
             type = (try? c.decode(String.self, forKey: .type)) ?? ""
@@ -291,13 +572,15 @@ final class DataManager: ObservableObject {
             threeSixtyView = (try? c.decode(String.self, forKey: .threeSixtyView)) ?? ""
             modelDescription = (try? c.decode(String.self, forKey: .modelDescription)) ?? ""
             productImage = (try? c.decode(String.self, forKey: .productImage)) ?? ""
+            releaseDate = (try? c.decode(String.self, forKey: .releaseDate)) ?? ""
         }
     }
 
 
 
     // Upsert-from-JSON: never overwrites user flags (checked/built/favorite/quantity/owner)
-    private func loadFromJSON(into context: ModelContext, owner: User, mode: ImportMode = .upsert) async {
+    @discardableResult
+    private func loadFromJSON(into context: ModelContext, owner: User, mode: ImportMode = .upsert, allowRemote: Bool = false) async -> Bool {
         print("[Catalog] loadFromJSON: start")
         let preCount = (try? context.fetchCount(FetchDescriptor<MetalModel>())) ?? -1
         print("[Catalog] Existing models before import: \(preCount)")
@@ -322,7 +605,7 @@ final class DataManager: ObservableObject {
             queryItems.append(URLQueryItem(name: "t", value: String(Int(Date().timeIntervalSince1970))))
             components.queryItems = queryItems
             guard let url = components.url else { throw URLError(.badURL) }
-            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12)
             #if os(iOS)
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             #endif
@@ -342,26 +625,30 @@ final class DataManager: ObservableObject {
             return try Data(contentsOf: url)
         }
 
-        do {
-            // Try remote first
-            print("[Catalog] Remote fetch succeeded. Beginning upsert…")
-            let data = try await fetchRemoteData()
-            switch mode {
-            case .upsert:
-                try await upsert(from: data, into: context, owner: owner)
-            case .replaceFromDeveloperJSON:
-                try await replaceCatalog(from: data, into: context, owner: owner)
+        if allowRemote {
+            do {
+                let data = try await fetchRemoteData()
+                print("[Catalog] Remote fetch succeeded. Beginning upsert")
+                switch mode {
+                case .upsert:
+                    try await upsert(from: data, into: context, owner: owner)
+                case .replaceFromDeveloperJSON:
+                    try await replaceCatalog(from: data, into: context, owner: owner)
+                }
+                UserDefaults.standard.set(Date(), forKey: lastUpdatedKey)
+                print("✅ [Catalog] Loaded from remote and upserted. Pre-count: \(preCount), Post-count: \((try? context.fetchCount(FetchDescriptor<MetalModel>())) ?? -1)")
+                return true
+            } catch {
+                print("⚠️ [Catalog] Remote fetch failed: \(error) — falling back to bundle")
             }
-            print("✅ [Catalog] Loaded from remote and upserted. Pre-count: \(preCount), Post-count: \((try? context.fetchCount(FetchDescriptor<MetalModel>())) ?? -1)")
-            return
-        } catch {
-            print("⚠️ [Catalog] Remote fetch failed: \(error) — falling back to bundle")
+        } else {
+            print("[Catalog] Skipping remote fetch for fast local startup")
         }
 
         do {
             // Fallback to bundled file
             let data = try loadBundledData()
-            print("[Catalog] Loaded bundled JSON (bytes: \(data.count)). Beginning upsert…")
+            print("[Catalog] Loaded bundled JSON (bytes: \(data.count)). Beginning upsert")
             switch mode {
             case .upsert:
                 try await upsert(from: data, into: context, owner: owner)
@@ -369,82 +656,122 @@ final class DataManager: ObservableObject {
                 try await replaceCatalog(from: data, into: context, owner: owner)
             }
             print("✅ [Catalog] Loaded from bundle and upserted. Pre-count: \(preCount), Post-count: \((try? context.fetchCount(FetchDescriptor<MetalModel>())) ?? -1)")
+            return true
         } catch {
             print("❌ [Catalog] JSON import failed: \(error)")
+            return false
         }
+    }
+
+    private func applyCatalogMetadata(from jm: JSONModel, to model: MetalModel, number: String) -> Bool {
+        applyCatalogMetadata(from: payload(from: jm), to: model, number: number)
+    }
+
+    private func applyCatalogMetadata(from payload: CatalogEditPayload, to model: MetalModel, number: String) -> Bool {
+        var didChange = false
+
+        func assign<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<MetalModel, T>, _ value: T) {
+            if model[keyPath: keyPath] != value {
+                model[keyPath: keyPath] = value
+                didChange = true
+            }
+        }
+
+        assign(\.name, payload.name)
+        assign(\.number, number)
+        assign(\.productCode, payload.productCode)
+        assign(\.character, payload.character)
+        assign(\.firstReleaseYear, payload.firstReleaseYear)
+        assign(\.releaseCount, payload.releaseCount)
+        assign(\.series, payload.series)
+        assign(\.category, payload.category)
+        assign(\.difficulty, payload.difficulty)
+        assign(\.sheets, payload.sheets)
+        assign(\.link, payload.link)
+        assign(\.instructionsLink, payload.instructionsLink)
+        assign(\.type, payload.type)
+        assign(\.status, payload.status)
+        assign(\.threeSixtyView, payload.threeSixtyView)
+        assign(\.modelDescription, payload.modelDescription)
+        assign(\.productImage, payload.productImage)
+        assign(\.releaseDate, payload.releaseDate)
+
+        return didChange
     }
 
     // Helper to keep the original upsert logic intact
     private func upsert(from data: Data, into context: ModelContext, owner: User) async throws {
         let decoder = JSONDecoder()
         print("[Catalog] Upsert: decoding JSON (bytes: \(data.count))…")
-        let items = try decoder.decode([JSONModel].self, from: data)
-        print("[Catalog] Upsert: decoded items: \(items.count)")
+        let remoteItems = try decoder.decode([JSONModel].self, from: data)
+        let items = mergedCatalogImportItems(from: remoteItems)
+        print("[Catalog] Upsert: decoded items: \(remoteItems.count), importing: \(items.count)")
+
+        try migrateCatalogNumberAliases(in: context)
 
         // Existing models keyed by number
         let existing = (try? context.fetch(FetchDescriptor<MetalModel>())) ?? []
-        var byNumber = Dictionary(uniqueKeysWithValues: existing.map { ($0.number, $0) })
+        var byNumber = modelsByNumber(existing)
+        var byID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
 
         let existingCount = existing.count
         var updated = 0
         var inserted = 0
+        var unchanged = 0
 
-        for jm in items {
-            if let m = byNumber[jm.number] {
-                updated += 1
-                // Update only catalog metadata
-                m.name = jm.name
-                m.productCode = jm.productCode
-                m.character = jm.character
-                m.category = jm.category
-                m.firstReleaseYear = jm.firstReleaseYear
-                m.releaseCount = jm.releaseCount
-                m.series = jm.series
-                m.difficulty = jm.difficulty
-                m.sheets = jm.sheets
-                m.link = jm.link
-                m.instructionsLink = jm.instructionsLink
-                m.type = jm.type
-                m.status = jm.status
-                m.threeSixtyView = jm.threeSixtyView
-                m.modelDescription = jm.modelDescription
-                m.productImage = jm.productImage
+        for item in items {
+            let payload = item.payload
+            let number = normalizedKey(payload.number)
+            guard !number.isEmpty else { continue }
+
+            if let m = byNumber[number] ?? byID[MetalModel.stableID(for: item.baseNumber)] ?? byNumber[item.baseNumber] {
+                if applyCatalogMetadata(from: payload, to: m, number: number) {
+                    updated += 1
+                } else {
+                    unchanged += 1
+                }
+                byNumber[number] = m
+                byID[m.id] = m
             } else {
                 inserted += 1
                 // Insert new row
                 let model = MetalModel(
-                    id: MetalModel.stableID(for: jm.number),
-                    backupIdentifier: jm.number,
-                    checked: jm.checked,
-                    name: jm.name,
-                    number: jm.number,
-                    productCode: jm.productCode,
-                    character: jm.character,
-                    category: jm.category,
-                    firstReleaseYear: jm.firstReleaseYear,
-                    releaseCount: jm.releaseCount,
-                    series: jm.series,
-                    difficulty: jm.difficulty,
-                    sheets: jm.sheets,
-                    link: jm.link,
-                    instructionsLink: jm.instructionsLink,
-                    type: jm.type,
-                    status: jm.status,
-                    threeSixtyView: jm.threeSixtyView,
-                    modelDescription: jm.modelDescription,
-                    productImage: jm.productImage,
+                    id: MetalModel.stableID(for: item.baseNumber),
+                    backupIdentifier: number,
+                    checked: payload.checked,
+                    name: payload.name,
+                    number: number,
+                    productCode: payload.productCode,
+                    character: payload.character,
+                    category: payload.category,
+                    firstReleaseYear: payload.firstReleaseYear,
+                    releaseCount: payload.releaseCount,
+                    series: payload.series,
+                    difficulty: payload.difficulty,
+                    sheets: payload.sheets,
+                    link: payload.link,
+                    instructionsLink: payload.instructionsLink,
+                    type: payload.type,
+                    status: payload.status,
+                    threeSixtyView: payload.threeSixtyView,
+                    modelDescription: payload.modelDescription,
+                    productImage: payload.productImage,
+                    releaseDate: payload.releaseDate,
                     isFavorite: false,
                     isWishlisted: false,
-                    quantity: jm.checked ? 1 : 0,
-                    built: jm.built
+                    quantity: payload.checked ? 1 : 0,
+                    built: item.built
                 )
                 model.owner = owner
                 context.insert(model)
-                byNumber[jm.number] = model
+                byNumber[number] = model
+                byID[model.id] = model
             }
         }
-        print("[Catalog] Upsert: existing=\(existingCount), updated=\(updated), inserted=\(inserted)")
-        try context.save()
+        print("[Catalog] Upsert: existing=\(existingCount), updated=\(updated), unchanged=\(unchanged), inserted=\(inserted)")
+        if updated > 0 || inserted > 0 {
+            try context.save()
+        }
         let postCount = (try? context.fetchCount(FetchDescriptor<MetalModel>())) ?? -1
         print("[Catalog] Upsert: save complete. Total models now: \(postCount)")
     }
@@ -453,70 +780,68 @@ final class DataManager: ObservableObject {
     // but preserves user flags when numbers/backupIdentifiers match.
     private func replaceCatalog(from data: Data, into context: ModelContext, owner: User) async throws {
         let decoder = JSONDecoder()
-        let items = try decoder.decode([JSONModel].self, from: data)
+        let remoteItems = try decoder.decode([JSONModel].self, from: data)
+        let items = mergedCatalogImportItems(from: remoteItems)
+
+        try migrateCatalogNumberAliases(in: context)
 
         // Build lookup of desired numbers from JSON
-        let desiredByNumber = Dictionary(uniqueKeysWithValues: items.map { ($0.number, $0) })
+        let desiredNumbers = Set(items.map { normalizedKey($0.payload.number) }.filter { !$0.isEmpty })
 
         // Fetch existing models
         let existingModels = (try? context.fetch(FetchDescriptor<MetalModel>())) ?? []
-        let existingByNumber = Dictionary(uniqueKeysWithValues: existingModels.map { ($0.number, $0) })
+        var existingByNumber = modelsByNumber(existingModels)
+        var existingByID = Dictionary(uniqueKeysWithValues: existingModels.map { ($0.id, $0) })
 
         // 1) Delete any existing models whose number is NOT in the dev JSON
-        for model in existingModels where desiredByNumber[model.number] == nil {
+        for model in existingModels where !desiredNumbers.contains(normalizedKey(model.number)) {
             context.delete(model)
         }
 
         // 2) Upsert for items in JSON, preserving user flags on matches
-        for jm in items {
-            if let existing = existingByNumber[jm.number] {
+        for item in items {
+            let payload = item.payload
+            let number = normalizedKey(payload.number)
+            guard !number.isEmpty else { continue }
+
+            if let existing = existingByNumber[number] ?? existingByID[MetalModel.stableID(for: item.baseNumber)] ?? existingByNumber[item.baseNumber] {
                 // Update catalog fields, preserve user flags
-                existing.name = jm.name
-                existing.productCode = jm.productCode
-                existing.character = jm.character
-                existing.category = jm.category
-                existing.firstReleaseYear = jm.firstReleaseYear
-                existing.releaseCount = jm.releaseCount
-                existing.series = jm.series
-                existing.difficulty = jm.difficulty
-                existing.sheets = jm.sheets
-                existing.link = jm.link
-                existing.instructionsLink = jm.instructionsLink
-                existing.type = jm.type
-                existing.status = jm.status
-                existing.threeSixtyView = jm.threeSixtyView
-                existing.modelDescription = jm.modelDescription
-                existing.productImage = jm.productImage
+                _ = applyCatalogMetadata(from: payload, to: existing, number: number)
+                existingByNumber[number] = existing
+                existingByID[existing.id] = existing
             } else {
                 // Insert new row with user flags defaulted based on JSON
                 let model = MetalModel(
-                    id: MetalModel.stableID(for: jm.number),
-                    backupIdentifier: jm.number,
-                    checked: jm.checked,
-                    name: jm.name,
-                    number: jm.number,
-                    productCode: jm.productCode,
-                    character: jm.character,
-                    category: jm.category,
-                    firstReleaseYear: jm.firstReleaseYear,
-                    releaseCount: jm.releaseCount,
-                    series: jm.series,
-                    difficulty: jm.difficulty,
-                    sheets: jm.sheets,
-                    link: jm.link,
-                    instructionsLink: jm.instructionsLink,
-                    type: jm.type,
-                    status: jm.status,
-                    threeSixtyView: jm.threeSixtyView,
-                    modelDescription: jm.modelDescription,
-                    productImage: jm.productImage,
+                    id: MetalModel.stableID(for: item.baseNumber),
+                    backupIdentifier: number,
+                    checked: payload.checked,
+                    name: payload.name,
+                    number: number,
+                    productCode: payload.productCode,
+                    character: payload.character,
+                    category: payload.category,
+                    firstReleaseYear: payload.firstReleaseYear,
+                    releaseCount: payload.releaseCount,
+                    series: payload.series,
+                    difficulty: payload.difficulty,
+                    sheets: payload.sheets,
+                    link: payload.link,
+                    instructionsLink: payload.instructionsLink,
+                    type: payload.type,
+                    status: payload.status,
+                    threeSixtyView: payload.threeSixtyView,
+                    modelDescription: payload.modelDescription,
+                    productImage: payload.productImage,
+                    releaseDate: payload.releaseDate,
                     isFavorite: false,
                     isWishlisted: false,
-                    quantity: jm.checked ? 1 : 0,
-                    built: jm.built
+                    quantity: payload.checked ? 1 : 0,
+                    built: item.built
                 )
                 model.owner = owner
                 context.insert(model)
+                existingByNumber[number] = model
+                existingByID[model.id] = model
             }
         }
 
@@ -524,25 +849,57 @@ final class DataManager: ObservableObject {
         try context.save()
     }
 
-    // Optional one-shot version gate (kept for future use)
-    private func runCatalogImportIfNeeded(in context: ModelContext, owner: User) async {
-        print("[Catalog] runCatalogImportIfNeeded: bundled=\(bundledCatalogVersion)")
-        let fd = FetchDescriptor<AppMeta>(predicate: #Predicate { $0.key == "catalogVersion" })
-        let current = try? context.fetch(fd).first
-        let currentVersion = current?.intValue ?? 0
-        print("[Catalog] Current catalogVersion in store: \(currentVersion)")
-        guard bundledCatalogVersion > currentVersion else { print("[Catalog] Version gate: up-to-date; skipping import"); return }
+    private func migrateCatalogNumberAliases(in context: ModelContext) throws {
+        guard !catalogNumberAliases.isEmpty else { return }
 
-        print("[Catalog] Version gate: importing new catalog version…")
-        await loadFromJSON(into: context, owner: owner)
+        let models = (try? context.fetch(FetchDescriptor<MetalModel>())) ?? []
+        guard !models.isEmpty else { return }
 
-        let meta = current ?? AppMeta(key: "catalogVersion", intValue: 0)
-        meta.intValue = bundledCatalogVersion
-        if current == nil { context.insert(meta) }
-        try? context.save()
-        print("[Catalog] Version gate: saved new version=\(bundledCatalogVersion)")
+        var byNumber = modelsByNumber(models)
+        var changed = false
+
+        for (oldNumber, newNumber) in catalogNumberAliases {
+            guard let oldModel = byNumber[oldNumber] else { continue }
+
+            if let newModel = byNumber[newNumber], newModel !== oldModel {
+                newModel.checked = newModel.checked || oldModel.checked
+                newModel.isFavorite = newModel.isFavorite || oldModel.isFavorite
+                newModel.isWishlisted = newModel.isWishlisted || oldModel.isWishlisted
+                newModel.quantity = max(newModel.quantity, oldModel.quantity)
+                newModel.built = newModel.built || oldModel.built
+
+                let oldId = oldModel.id
+                let newId = newModel.id
+                let oldNotes = (try? context.fetch(
+                    FetchDescriptor<ModelNote>(predicate: #Predicate { $0.modelId == oldId })
+                )) ?? []
+                let oldPhotos = (try? context.fetch(
+                    FetchDescriptor<ModelPhoto>(predicate: #Predicate { $0.modelId == oldId })
+                )) ?? []
+
+                for note in oldNotes {
+                    note.modelId = newModel.id
+                }
+                for photo in oldPhotos {
+                    photo.modelId = newId
+                }
+
+                context.delete(oldModel)
+                byNumber.removeValue(forKey: oldNumber)
+                changed = true
+            } else {
+                oldModel.number = newNumber
+                oldModel.backupIdentifier = newNumber
+                byNumber.removeValue(forKey: oldNumber)
+                byNumber[newNumber] = oldModel
+                changed = true
+            }
+        }
+
+        if changed {
+            try context.save()
+        }
     }
-
 
     // MARK: - User actions
 
@@ -603,6 +960,84 @@ final class DataManager: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    func generateWishlistShareHTML() -> String {
+        let items = allModels
+            .filter { $0.isWishlisted }
+            .sorted { $0.number.localizedStandardCompare($1.number) == .orderedAscending }
+        guard !items.isEmpty else { return "" }
+
+        func escape(_ value: String) -> String {
+            value
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+                .replacingOccurrences(of: "\"", with: "&quot;")
+                .replacingOccurrences(of: "'", with: "&#39;")
+        }
+
+        let cards = items.map { model -> String in
+            let number = escape(model.number)
+            let name = escape(model.name)
+            let link = escape(model.link.isEmpty ? model.instructionsLink : model.link)
+            let image = model.productImage.trimmingCharacters(in: .whitespacesAndNewlines)
+            let imageHTML: String
+            if image.lowercased().hasPrefix("http") {
+                imageHTML = "<img src=\"\(escape(image))\" alt=\"\(name)\">"
+            } else {
+                imageHTML = "<div class=\"image placeholder\">No image</div>"
+            }
+
+            let linkHTML = link.isEmpty ? "" : "<a href=\"\(link)\">Model page</a>"
+            return """
+            <article class="card">
+              <div class="image">\(imageHTML)</div>
+              <div class="meta">
+                <div class="number">\(number)</div>
+                <h2>\(name)</h2>
+                \(linkHTML)
+              </div>
+            </article>
+            """
+        }.joined(separator: "\n")
+
+        return """
+        <!doctype html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Pixar Cars Wishlist</title>
+          <style>
+            :root { color-scheme: light; --accent: #66d12d; --ink: #182015; --muted: #5e695a; --line: #d8e0d4; --paper: #f6f8f4; }
+            * { box-sizing: border-box; }
+            body { margin: 0; font: 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: var(--paper); }
+            header { padding: 28px 24px 18px; background: #ffffff; border-bottom: 1px solid var(--line); }
+            h1 { margin: 0 0 6px; font-size: 30px; letter-spacing: 0; }
+            .summary { color: var(--muted); }
+            main { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; padding: 18px; }
+            .card { background: #ffffff; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+            .image { height: 170px; display: flex; align-items: center; justify-content: center; background: #eef3eb; }
+            .image img { width: 100%; height: 100%; object-fit: contain; padding: 12px; }
+            .placeholder { color: var(--muted); font-size: 13px; }
+            .meta { padding: 14px; }
+            .number { color: var(--accent); font-weight: 700; font-size: 13px; margin-bottom: 5px; }
+            h2 { margin: 0 0 10px; font-size: 18px; line-height: 1.25; }
+            a { color: #276b18; font-weight: 600; text-decoration: none; }
+          </style>
+        </head>
+        <body>
+          <header>
+            <h1>Pixar Cars Wishlist</h1>
+            <div class="summary">\(items.count) model\(items.count == 1 ? "" : "s")</div>
+          </header>
+          <main>
+        \(cards)
+          </main>
+        </body>
+        </html>
+        """
+    }
+
 
 
     // ADDED THESE
@@ -610,8 +1045,11 @@ final class DataManager: ObservableObject {
     // Add near other public helpers
     @MainActor
     func handleJSONUpdates() async {
-        await loadFromJSON(into: modelContext, owner: currentUser)   // additive import
+        let imported = await loadFromJSON(into: modelContext, owner: currentUser, allowRemote: true)   // additive import
+        guard imported else { return }
         enforceStableIDs(in: modelContext)
+        setAppMetaIntValue(bundledCatalogVersion, for: "catalogVersion", in: modelContext)
+        setAppMetaIntValue(stableIDMigrationVersion, for: stableIDMigrationKey, in: modelContext)
         try? modelContext.save()
         refreshData()
     }
@@ -626,10 +1064,17 @@ final class DataManager: ObservableObject {
             // delete models
             for m in (try modelContext.fetch(FetchDescriptor<MetalModel>())) { modelContext.delete(m) }
             try modelContext.save()
+            photosLoaded = false
+            allPhotos = []
+            photosByModelID = [:]
+            try? FileManager.default.removeItem(at: Self.catalogOverridesURL())
 
             // re-import
-            await loadFromJSON(into: modelContext, owner: currentUser)
+            let imported = await loadFromJSON(into: modelContext, owner: currentUser, allowRemote: false)
+            guard imported else { return false }
             enforceStableIDs(in: modelContext)
+            setAppMetaIntValue(bundledCatalogVersion, for: "catalogVersion", in: modelContext)
+            setAppMetaIntValue(stableIDMigrationVersion, for: stableIDMigrationKey, in: modelContext)
             try modelContext.save()
             refreshData()
             return true
@@ -651,11 +1096,92 @@ final class DataManager: ObservableObject {
         let before = allModels.count
         let devModeEnabled = UserDefaults.standard.bool(forKey: "devModeEnabled")
         let mode: ImportMode = devModeEnabled ? .replaceFromDeveloperJSON : .upsert
-        await loadFromJSON(into: modelContext, owner: currentUser, mode: mode)
+        let imported = await loadFromJSON(into: modelContext, owner: currentUser, mode: mode, allowRemote: true)
+        guard imported else { return false }
+        enforceStableIDs(in: modelContext)
+        setAppMetaIntValue(bundledCatalogVersion, for: "catalogVersion", in: modelContext)
+        setAppMetaIntValue(stableIDMigrationVersion, for: stableIDMigrationKey, in: modelContext)
+        try? modelContext.save()
         let after = (try? modelContext.fetchCount(FetchDescriptor<MetalModel>())) ?? -1
         print("[Catalog] Manual refresh complete. Before=\(before), After=\(after)")
         refreshData()
         return true
+    }
+
+    @MainActor
+    func applyCatalogEdit(to model: MetalModel, payload: CatalogEditPayload) {
+        let originalNumber = model.number
+        let cleanNumber = payload.number.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanNumber.isEmpty else { return }
+
+        model.backupIdentifier = cleanNumber
+        model.name = payload.name
+        model.number = cleanNumber
+        model.productCode = payload.productCode
+        model.character = payload.character
+        model.firstReleaseYear = payload.firstReleaseYear
+        model.releaseCount = payload.releaseCount
+        model.series = payload.series
+        model.category = payload.category
+        model.difficulty = payload.difficulty
+        model.sheets = payload.sheets
+        model.link = payload.link
+        model.instructionsLink = payload.instructionsLink
+        model.type = payload.type
+        model.status = payload.status
+        model.threeSixtyView = payload.threeSixtyView
+        model.modelDescription = payload.modelDescription
+        model.productImage = payload.productImage
+        model.releaseDate = payload.releaseDate
+
+        putCatalogOverride(baseNumber: originalNumber, payload: payload)
+        try? modelContext.save()
+        refreshData(loadPhotos: photosLoaded)
+    }
+
+    @MainActor
+    func applyCatalogCreate(_ payload: CatalogEditPayload) {
+        let cleanNumber = payload.number.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanNumber.isEmpty else { return }
+
+        let existingModels = (try? modelContext.fetch(FetchDescriptor<MetalModel>())) ?? []
+        if let existing = modelsByNumber(existingModels)[cleanNumber] {
+            applyCatalogEdit(to: existing, payload: payload)
+            return
+        }
+
+        let model = MetalModel(
+            id: MetalModel.stableID(for: cleanNumber),
+            backupIdentifier: cleanNumber,
+            checked: payload.checked,
+            name: payload.name,
+            number: cleanNumber,
+            productCode: payload.productCode,
+            character: payload.character,
+            category: payload.category,
+            firstReleaseYear: payload.firstReleaseYear,
+            releaseCount: payload.releaseCount,
+            series: payload.series,
+            difficulty: payload.difficulty,
+            sheets: payload.sheets,
+            link: payload.link,
+            instructionsLink: payload.instructionsLink,
+            type: payload.type,
+            status: payload.status,
+            threeSixtyView: payload.threeSixtyView,
+            modelDescription: payload.modelDescription,
+            productImage: payload.productImage,
+            releaseDate: payload.releaseDate,
+            isFavorite: false,
+            isWishlisted: false,
+            quantity: payload.checked ? 1 : 0,
+            built: false,
+            owner: currentUser
+        )
+        modelContext.insert(model)
+        putCatalogOverride(baseNumber: cleanNumber, payload: payload)
+        try? modelContext.save()
+        refreshData(loadPhotos: photosLoaded)
     }
 
     @MainActor
@@ -701,11 +1227,12 @@ final class DataManager: ObservableObject {
         }
 
         // Refresh from default JSON first (merge/upsert)
-        await loadFromJSON(into: modelContext, owner: currentUser, mode: .upsert)
+        let imported = await loadFromJSON(into: modelContext, owner: currentUser, mode: .upsert, allowRemote: false)
+        guard imported else { return }
 
         // Build lookups
         let models = (try? modelContext.fetch(FetchDescriptor<MetalModel>())) ?? []
-        let byNumber: [String: MetalModel] = Dictionary(uniqueKeysWithValues: models.map { ($0.number, $0) })
+        let byNumber = modelsByNumber(models)
 
         // Restore flags
         for f in snap.flags {
@@ -735,8 +1262,10 @@ final class DataManager: ObservableObject {
             modelContext.insert(newPhoto)
         }
 
+        setAppMetaIntValue(bundledCatalogVersion, for: "catalogVersion", in: modelContext)
+        setAppMetaIntValue(stableIDMigrationVersion, for: stableIDMigrationKey, in: modelContext)
         try? modelContext.save()
-        refreshData()
+        refreshData(loadPhotos: photosLoaded)
         UserDefaults.standard.removeObject(forKey: developerSnapshotKey)
         print("[DevMode] Snapshot restored and cleared")
     }
@@ -761,7 +1290,7 @@ final class DataManager: ObservableObject {
             photo.checksum = checksum
             modelContext.insert(photo)
             try? modelContext.save()
-            refreshData()
+            refreshData(loadPhotos: true)
         }
     }
 
@@ -796,13 +1325,13 @@ final class DataManager: ObservableObject {
             if let p = try? ctx.fetch(fd).first {
                 ctx.delete(p)
                 try? ctx.save()
-                Task { @MainActor in self.refreshData() }
+                Task { @MainActor in self.refreshData(loadPhotos: true) }
             }
         }
     }
 
     func updateNote(for model: MetalModel, text: String) {
-        if let existing = allNotes.first(where: { $0.modelId == model.id }) {
+        if let existing = notesByModelID[model.id] {
             existing.text = text
             existing.timestamp = Date()
         } else {
@@ -814,13 +1343,24 @@ final class DataManager: ObservableObject {
 
     // DataManager.swift — add near your Photos/Notes helpers
     func getPhotos(for model: MetalModel) -> [ModelPhoto] {
-        allPhotos
-            .filter { $0.modelId == model.id }
-            .sorted { $0.timestamp > $1.timestamp }
+        if photosLoaded {
+            return photosByModelID[model.id] ?? []
+        }
+
+        let mid = model.id
+        let descriptor = FetchDescriptor<ModelPhoto>(
+            predicate: #Predicate { $0.modelId == mid },
+            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+        )
+        return (try? modelContext.fetch(descriptor)) ?? []
     }
 
     func getNote(for model: MetalModel) -> ModelNote? {
-        allNotes.first { $0.modelId == model.id }
+        notesByModelID[model.id]
+    }
+
+    func model(for id: UUID) -> MetalModel? {
+        modelsByID[id]
     }
 
 
@@ -831,13 +1371,50 @@ final class DataManager: ObservableObject {
         return try modelContext.fetch(fd).first
     }
 
-    private func refreshData() {
+    @MainActor
+    func loadPhotosIfNeeded() {
+        guard !photosLoaded else { return }
+        refreshPhotos()
+    }
+
+    @MainActor
+    func refreshPhotos() {
+        let descriptor = FetchDescriptor<ModelPhoto>(
+            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+        )
+        allPhotos = (try? modelContext.fetch(descriptor)) ?? []
+        photosByModelID = Dictionary(grouping: allPhotos, by: { $0.modelId })
+        photosLoaded = true
+    }
+
+    private func refreshData(loadPhotos: Bool = false) {
         allModels = (try? modelContext.fetch(FetchDescriptor<MetalModel>())) ?? []
-        allPhotos = (try? modelContext.fetch(FetchDescriptor<ModelPhoto>())) ?? []
+        modelsByID.removeAll(keepingCapacity: true)
+        for model in allModels {
+            modelsByID[model.id] = model
+        }
+        favoriteModels = allModels.filter { $0.isFavorite }
+        wishlistedModels = allModels.filter { $0.isWishlisted }
+
+        if loadPhotos || photosLoaded {
+            refreshPhotos()
+        }
         allNotes  = (try? modelContext.fetch(FetchDescriptor<ModelNote>())) ?? []
+        notesByModelID.removeAll(keepingCapacity: true)
+        for note in allNotes {
+            if let existing = notesByModelID[note.modelId] {
+                if note.timestamp > existing.timestamp {
+                    notesByModelID[note.modelId] = note
+                }
+            } else {
+                notesByModelID[note.modelId] = note
+            }
+        }
         invalidateCache()
+        #if DEBUG
         logDuplicateNumbers()
         print("[Catalog] refreshData: models=\(allModels.count), photos=\(allPhotos.count), notes=\(allNotes.count)")
+        #endif
     }
 
     private func saveContext() {

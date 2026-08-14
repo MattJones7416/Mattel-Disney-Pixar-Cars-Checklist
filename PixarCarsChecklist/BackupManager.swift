@@ -117,9 +117,12 @@ final class BackupManager: ObservableObject {
         try fileManager.createDirectory(at: photosDir, withIntermediateDirectories: true)
 
         let models = try context.fetch(FetchDescriptor<MetalModel>())
-        let idToBackup = Dictionary(uniqueKeysWithValues: models.map {
-            ($0.id, $0.backupIdentifier.trimmingCharacters(in: .whitespacesAndNewlines))
-        })
+        var idToBackup: [UUID: String] = [:]
+        for model in models {
+            let backupIdentifier = model.backupIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !backupIdentifier.isEmpty else { continue }
+            idToBackup[model.id] = backupIdentifier
+        }
 
         var photoMetadata: [PhotoMetadata] = []
 
@@ -146,9 +149,12 @@ final class BackupManager: ObservableObject {
     private func exportNotes(context: ModelContext, to directory: URL) async throws -> URL {
         let notes = try context.fetch(FetchDescriptor<ModelNote>())
         let models = try context.fetch(FetchDescriptor<MetalModel>())
-        let modelIdToBackupId = Dictionary(uniqueKeysWithValues: models.map {
-            ($0.id, $0.backupIdentifier.trimmingCharacters(in: .whitespacesAndNewlines))
-        })
+        var modelIdToBackupId: [UUID: String] = [:]
+        for model in models {
+            let backupIdentifier = model.backupIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !backupIdentifier.isEmpty else { continue }
+            modelIdToBackupId[model.id] = backupIdentifier
+        }
 
         let noteData: [NoteExportData] = notes.compactMap { note in
             let backupId = modelIdToBackupId[note.modelId] ?? ""
@@ -204,17 +210,20 @@ final class BackupManager: ObservableObject {
         let currentModels = try context.fetch(FetchDescriptor<MetalModel>())
 
         // Build lookup: backupIdentifier (trimmed, non-empty) -> MetalModel
-        let backupIdToModel: [String: MetalModel] = Dictionary(
-            uniqueKeysWithValues: currentModels.compactMap { m in
-                let key = m.backupIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-                return key.isEmpty ? nil : (key, m)
-            }
-        )
+        var backupIdToModel: [String: MetalModel] = [:]
+        for model in currentModels {
+            let key = model.backupIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
+            backupIdToModel[key] = backupIdToModel[key] ?? model
+        }
 
         // Build lookup: backupIdentifier (trimmed) -> exported user flags
-        let backupUserModelsByID: [String: UserModelData] = Dictionary(
-            uniqueKeysWithValues: backupUserModels.map { ($0.backupIdentifier.trimmingCharacters(in: .whitespacesAndNewlines), $0) }
-        )
+        var backupUserModelsByID: [String: UserModelData] = [:]
+        for userModel in backupUserModels {
+            let key = userModel.backupIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
+            backupUserModelsByID[key] = userModel
+        }
 
         // Restore flags (only when there is an exact backupIdentifier match)
         for model in currentModels {

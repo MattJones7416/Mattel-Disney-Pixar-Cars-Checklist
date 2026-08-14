@@ -206,6 +206,14 @@
 				TargetAttributes = {
 					3449DB962E380E1F00E44C13 = {
 						CreatedOnToolsVersion = 16.4;
+						SystemCapabilities = {
+							com.apple.InAppPurchase = {
+								enabled = 1;
+							};
+							com.apple.Push = {
+								enabled = 1;
+							};
+						};
 					};
 					3449DBA62E380E2500E44C13 = {
 						CreatedOnToolsVersion = 16.4;
@@ -432,6 +440,7 @@
 		3449DBBC2E380E2500E44C13 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				APS_ENVIRONMENT = development;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = PixarCarsChecklist/PixarCarsChecklist.entitlements;
@@ -487,6 +496,7 @@
 		3449DBBD2E380E2500E44C13 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				APS_ENVIRONMENT = production;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = PixarCarsChecklist/PixarCarsChecklist.entitlements;

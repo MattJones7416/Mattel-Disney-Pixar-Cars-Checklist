@@ -3,14 +3,6 @@
 <plist version="1.0">
 <dict>
 	<key>aps-environment</key>
-	<string>development</string>
-	<key>com.apple.developer.aps-environment</key>
-	<string>development</string>
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
-	<key>com.apple.security.files.user-selected.read-only</key>
-	<true/>
-	<key>com.apple.security.network.client</key>
-	<true/>
+	<string>$(APS_ENVIRONMENT)</string>
 </dict>
 </plist>

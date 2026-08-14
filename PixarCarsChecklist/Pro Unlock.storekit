@@ -1,0 +1,41 @@
+{
+  "identifier" : "7D16A5A1-487E-4955-A998-405C45453998",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "4.99",
+      "familyShareable" : false,
+      "internalID" : "6181814554",
+      "localizations" : [
+        {
+          "description" : "Unlock all collection and backup tools.",
+          "displayName" : "Cars Checklist Pro Unlock",
+          "locale" : "en_GB"
+        },
+        {
+          "description" : "Unlock all collection and backup tools.",
+          "displayName" : "Cars Checklist Pro Unlock",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.mattjproductions.PixarCarsChecklist.pro",
+      "referenceName" : "Cars Checklist Pro Unlock",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_failTransactionsEnabled" : false,
+    "_storeKitErrors" : [
+
+    ]
+  },
+  "subscriptionGroups" : [
+
+  ],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}

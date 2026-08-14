@@ -1,0 +1,50 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pixar-cars-social-api",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-08-14",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "vars": {
+    "AUTO_APPROVE_POSTS": "true",
+    "ADMIN_EMAIL": "mattjones7416@gmail.com",
+    "JWT_ISSUER": "pixar-cars-social-api",
+    "FEED_CACHE_SECONDS": "20",
+    "MAX_FEED_LIMIT": "60",
+    "MAX_MESSAGE_CHARS": "1400",
+    "MAX_IMAGE_BYTES": "1000000",
+    "MAX_TOTAL_MEDIA_BYTES": "8000000000",
+    "POSTS_PER_HOUR": "30",
+    "AUTH_ATTEMPTS_PER_HOUR": "12",
+    "REPORTS_PER_HOUR": "20",
+    "PASSWORD_PBKDF2_ITERATIONS": "100000",
+    "MODERATION_BLOCKED_WORDS": "",
+    "APNS_BUNDLE_ID": "com.mattjproductions.PixarCarsChecklist",
+    "MAX_PUSH_RECIPIENTS_PER_EVENT": "40",
+    "MAX_ADMIN_PUSH_RECIPIENTS_PER_EVENT": "20",
+    "CATALOG_REPO_OWNER": "MattJones7416",
+    "CATALOG_REPO_NAME": "Mattel-Disney-Pixar-Cars-Checklist",
+    "CATALOG_REPO_BRANCH": "main"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pixar-cars-social-db",
+      "database_id": "7b11c13e-bb40-423b-b891-321f40e28a46",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "pixar-cars-social-media"
+    }
+  ]
+}

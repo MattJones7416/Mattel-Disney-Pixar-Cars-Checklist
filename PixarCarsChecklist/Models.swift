@@ -32,6 +32,7 @@ final class MetalModel {
     var threeSixtyView: String = ""
     var modelDescription: String = ""
     var productImage: String = ""
+    var releaseDate: String = ""
 
     var isFavorite: Bool = false
     var isWishlisted: Bool = false
@@ -63,6 +64,7 @@ final class MetalModel {
         threeSixtyView: String = "",
         modelDescription: String = "",
         productImage: String = "",
+        releaseDate: String = "",
         isFavorite: Bool = false,
         isWishlisted: Bool = false,
         quantity: Int = 0,
@@ -89,6 +91,7 @@ final class MetalModel {
         self.threeSixtyView = threeSixtyView
         self.modelDescription = modelDescription
         self.productImage = productImage
+        self.releaseDate = releaseDate
         self.isFavorite = isFavorite
         self.isWishlisted = isWishlisted
         self.quantity = quantity
@@ -115,13 +118,16 @@ final class MetalModel {
         guard !text.isEmpty else { return true }
         let q = text.lowercased()
         return name.lowercased().contains(q)
-            || number.lowercased().contains(q)
-            || productCode.lowercased().contains(q)
-            || character.lowercased().contains(q)
+            || searchableNumbers.contains { $0.lowercased().contains(q) }
             || category.lowercased().contains(q)
             || series.lowercased().contains(q)
             || status.lowercased().contains(q)
             || type.lowercased().contains(q)
+            || releaseDate.lowercased().contains(q)
+    }
+
+    var searchableNumbers: [String] {
+        [number, productCode].filter { !$0.isEmpty }
     }
 }
 
@@ -219,6 +225,51 @@ enum ModelStatus: String {
     case none = ""
 }
 
+private enum ReleaseDateParserCache {
+    private static let lock = NSLock()
+    private static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
+    private static let isoFormatter = ISO8601DateFormatter()
+    private static var dates: [String: Date] = [:]
+    private static var misses: Set<String> = []
+
+    static func parse(_ value: String) -> Date? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let cached = dates[trimmed] {
+            return cached
+        }
+        if misses.contains(trimmed) {
+            return nil
+        }
+
+        for format in ["yyyy-MM-dd", "yyyy-MM", "yyyy"] {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: trimmed) {
+                dates[trimmed] = date
+                return date
+            }
+        }
+
+        if let date = isoFormatter.date(from: trimmed) {
+            dates[trimmed] = date
+            return date
+        }
+
+        misses.insert(trimmed)
+        return nil
+    }
+}
+
 extension MetalModel {
     /// UI-agnostic representation of the status
     var statusEnum: ModelStatus {
@@ -229,5 +280,13 @@ extension MetalModel {
     var statusText: String? {
         let trimmed = status.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var releaseDateValue: Date? {
+        Self.parseReleaseDate(releaseDate)
+    }
+
+    static func parseReleaseDate(_ value: String) -> Date? {
+        ReleaseDateParserCache.parse(value)
     }
 }
