@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleGetInfoString</key>
+	<string></string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Allow Pixar Cars Checklist to take photos of cars in your collection.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Allow Pixar Cars Checklist to save collection photos to your photo library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Allow Pixar Cars Checklist to attach photos from your library to cars in your collection.</string>
+	<key>NSPersistentHistoryTrackingKey</key>
+	<string>true</string>
+	<key>NSPersistentStoreRemoteChangeNotificationOptionKey</key>
+	<string>true</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>com.apple.developer.icloud-container-identifiers</key>
+	<array>
+		<string>iCloud.$(CFBundleIdentifier)</string>
+	</array>
+</dict>
+</plist>

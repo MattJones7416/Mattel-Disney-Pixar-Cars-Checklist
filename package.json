@@ -1,0 +1,14 @@
+{
+  "name": "pixar-cars-checklist",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Catalogue tooling for the unofficial Mattel Disney Pixar Cars checklist app.",
+  "type": "module",
+  "scripts": {
+    "catalog:sync": "node scripts/sync-catalog.mjs",
+    "catalog:validate": "node scripts/validate-catalog.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

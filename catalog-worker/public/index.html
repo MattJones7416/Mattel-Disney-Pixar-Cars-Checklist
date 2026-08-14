@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Catalogue service for the unofficial Pixar Cars Checklist app.">
+    <title>Pixar Cars Checklist Catalogue</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: linear-gradient(145deg, #171717, #42110d); }
+      main { width: min(42rem, calc(100% - 3rem)); padding: 2rem; border-radius: 1.5rem; background: color-mix(in srgb, Canvas 91%, transparent); box-shadow: 0 1.25rem 4rem #0007; }
+      img { width: 5rem; height: 5rem; border-radius: 1.2rem; float: right; margin-left: 1rem; }
+      h1 { margin-top: 0; line-height: 1.05; }
+      a { color: #e8493d; font-weight: 700; }
+      code { overflow-wrap: anywhere; }
+      .fine { clear: both; padding-top: 1rem; font-size: .82rem; opacity: .72; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="/icon.png" alt="Red car checklist icon">
+      <h1>Pixar Cars Checklist</h1>
+      <p>The live catalogue service for an unofficial Mattel Disney and Pixar <em>Cars</em> collector app.</p>
+      <p><a href="/api/catalog">Open catalogue JSON</a> · <a href="/health">Service health</a></p>
+      <p><code>GET /api/catalog</code></p>
+      <p class="fine">Independent collector project. Not affiliated with, endorsed by, or sponsored by Mattel, Disney, or Pixar. Catalogue metadata is adapted from the Disney·Pixar CARS Wiki under CC BY-SA 4.0.</p>
+    </main>
+  </body>
+</html>

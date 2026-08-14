@@ -1,0 +1,11 @@
+.DS_Store
+._*
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.build/
+.swiftpm/
+node_modules/
+.wrangler/
+*.cpuprofile
+catalog-worker/.dev.vars
