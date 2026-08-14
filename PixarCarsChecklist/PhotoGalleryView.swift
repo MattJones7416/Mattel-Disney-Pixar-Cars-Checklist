@@ -408,7 +408,7 @@ struct PhotoDetailView: View {
 #endif
             }
         }
-        .onChange(of: currentIndex) { newValue in
+        .onChange(of: currentIndex) { _, newValue in
             if newValue >= photos.count && !photos.isEmpty {
                 currentIndex = max(0, photos.count - 1)
             }
